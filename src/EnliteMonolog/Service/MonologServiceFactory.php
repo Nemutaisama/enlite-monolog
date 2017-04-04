@@ -8,6 +8,8 @@ namespace EnliteMonolog\Service;
 
 use Closure;
 use Exception;
+use Interop\Container\ContainerInterface;
+use Monolog\Formatter\LineFormatter;
 use Monolog\Handler\HandlerInterface;
 use Monolog\Logger;
 use Monolog\Formatter\FormatterInterface;
@@ -20,6 +22,9 @@ class MonologServiceFactory implements FactoryInterface
 
     /**
      * {@inheritdoc}
+     * @throws \Interop\Container\Exception\ContainerException
+     * @throws \RuntimeException
+     * @throws \Interop\Container\Exception\NotFoundException
      */
     public function createService(ServiceLocatorInterface $serviceLocator)
     {
@@ -29,39 +34,55 @@ class MonologServiceFactory implements FactoryInterface
     }
 
     /**
-     * @param ServiceLocatorInterface $serviceLocator
+     * {@inheritdoc}
+     * @throws \Interop\Container\Exception\NotFoundException
+     * @throws \RuntimeException
+     */
+    public function __invoke(ContainerInterface $container, $requestedName, array $options = null)
+    {
+        /** @var MonologOptions $options */
+        $options = $container->get('EnliteMonologOptions');
+        return $this->createLogger($container, $options);
+    }
+
+    /**
+     * @param ServiceLocatorInterface|ContainerInterface $container
      * @param MonologOptions $options
      * @return Logger
+     * @throws \Interop\Container\Exception\NotFoundException
+     * @throws \RuntimeException
+     * @throws \Interop\Container\Exception\ContainerException
      */
-    public function createLogger(ServiceLocatorInterface $serviceLocator, MonologOptions $options)
+    public function createLogger($container, MonologOptions $options)
     {
         $logger = new Logger($options->getName());
 
-        $handlers = array();
-        foreach ($options->getHandlers() as $handler) {
-            $handlers[] = $this->createHandler($serviceLocator, $options, $handler);
+        $handlers = array_reverse($options->getHandlers());
+        foreach ($handlers as $handler) {
+            $logger->pushHandler($this->createHandler($container, $options, $handler));
         }
-        $logger->setHandlers($handlers);
 
         foreach ($options->getProcessors() as $processor) {
-            $logger->pushProcessor($this->createProcessor($serviceLocator, $processor));
+            $logger->pushProcessor($this->createProcessor($container, $processor));
         }
 
         return $logger;
     }
 
     /**
-     * @param ServiceLocatorInterface $serviceLocator
+     * @param ServiceLocatorInterface|ContainerInterface $container
      * @param MonologOptions $options
      * @param string|array $handler
      * @throws \RuntimeException
      * @return HandlerInterface
+     * @throws \Interop\Container\Exception\NotFoundException
+     * @throws \Interop\Container\Exception\ContainerException
      *
      */
-    public function createHandler(ServiceLocatorInterface $serviceLocator, MonologOptions $options, $handler)
+    public function createHandler($container, MonologOptions $options, $handler)
     {
-        if (is_string($handler) && $serviceLocator->has($handler)) {
-            return $serviceLocator->get($handler);
+        if (is_string($handler) && $container->has($handler)) {
+            return $container->get($handler);
         } else {
             if (!isset($handler['name'])) {
                 throw new RuntimeException('Cannot create logger handler');
@@ -81,7 +102,7 @@ class MonologServiceFactory implements FactoryInterface
                 if (isset($handler['args']['handler'])) {
                     foreach ($options->getHandlers() as $key => $option) {
                         if ($handler['args']['handler'] == $key) {
-                            $handler['args']['handler'] = $this->createHandler($serviceLocator, $options, $option);
+                            $handler['args']['handler'] = $this->createHandler($container, $options, $option);
                             break;
                         }
                     }
@@ -92,8 +113,8 @@ class MonologServiceFactory implements FactoryInterface
 
                 $requiredArgsCount = $reflection->getConstructor()->getNumberOfRequiredParameters();
 
-                if ($requiredArgsCount > sizeof($handlerOptions)) {
-                    throw new RuntimeException(sprintf('Handler(%s) requires at least %d params. Only %d passed.', $handler['name'], $requiredArgsCount, sizeof($handlerOptions)));
+                if ($requiredArgsCount > count($handlerOptions)) {
+                    throw new RuntimeException(sprintf('Handler(%s) requires at least %d params. Only %d passed.', $handler['name'], $requiredArgsCount, count($handlerOptions)));
                 }
 
                 foreach($reflection->getConstructor()->getParameters() as $parameter) {
@@ -107,15 +128,18 @@ class MonologServiceFactory implements FactoryInterface
                     }
                     $parameters[$parameter->getPosition()] = $argumentValue;
                 }
+
+                /** @var HandlerInterface $instance */
                 $instance = $reflection->newInstanceArgs($parameters);
             } else {
 	            $class = $handler['name'];
 
+                /** @var HandlerInterface $instance */
 	            $instance = new $class();
             }
 
 	        if (isset($handler['formatter'])) {
-		        $formatter = $this->createFormatter($serviceLocator, $handler['formatter']);
+		        $formatter = $this->createFormatter($container, $handler['formatter']);
 		        $instance->setFormatter($formatter);
 	        }
 
@@ -123,17 +147,18 @@ class MonologServiceFactory implements FactoryInterface
         }
     }
 
-	/**
-	 * @param ServiceLocatorInterface $serviceLocator
-	 * @param string|array $formatter
-	 * @return FormatterInterface
-	 *
-	 * @throws RuntimeException
-	 */
-	public function createFormatter(ServiceLocatorInterface $serviceLocator, $formatter)
+    /**
+     * @param ServiceLocatorInterface|ContainerInterface $container
+     * @param string|array $formatter
+     * @return FormatterInterface
+     * @throws \Interop\Container\Exception\NotFoundException
+     * @throws \Interop\Container\Exception\ContainerException
+     * @throws RuntimeException
+     */
+	public function createFormatter($container, $formatter)
 	{
-		if (is_string($formatter) && $serviceLocator->has($formatter)) {
-			return $serviceLocator->get($formatter);
+		if (is_string($formatter) && $container->has($formatter)) {
+			return $container->get($formatter);
 		} else {
 			if (!isset($formatter['name'])) {
 				throw new RuntimeException('Cannot create logger formatter');
@@ -160,13 +185,14 @@ class MonologServiceFactory implements FactoryInterface
 	}
 
     /**
-     * @param ServiceLocatorInterface $serviceLocator
+     * @param ServiceLocatorInterface|ContainerInterface $container
      * @param $processor
      * @return Closure
-     *
+     * @throws \Interop\Container\Exception\NotFoundException
+     * @throws \Interop\Container\Exception\ContainerException
      * @throws RuntimeException
      */
-    public function createProcessor(ServiceLocatorInterface $serviceLocator, $processor)
+    public function createProcessor($container, $processor)
     {
         if ($processor instanceof Closure) {
             return $processor;
@@ -174,7 +200,7 @@ class MonologServiceFactory implements FactoryInterface
 
         if (is_string($processor)) {
             try {
-                $instance = $serviceLocator->get($processor);
+                $instance = $container->get($processor);
             } catch (Exception $ex) {
                 $instance = null;
             }
